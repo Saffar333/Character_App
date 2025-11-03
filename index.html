@@ -499,6 +499,7 @@
         let currentUserId = null;
         let telegramId = null;
         let telegramUser = null;
+        let userRecord = null;
 
         function refreshTelegramUser() {
             const latest = TelegramHelpers.getTelegramUser();
@@ -509,6 +510,93 @@
         }
 
         refreshTelegramUser();
+
+        async function ensureUserRecord(force = false) {
+            refreshTelegramUser();
+
+            if (!telegramId) {
+                return null;
+            }
+
+            if (!force && userRecord && userRecord.id) {
+                return userRecord;
+            }
+
+            try {
+                const { data: existing, error: fetchError } = await supabase
+                    .from('users')
+                    .select('id, username, first_name, daily_message_count, total_message_count')
+                    .eq('telegram_id', telegramId)
+                    .maybeSingle();
+
+                if (fetchError) {
+                    console.error('Ошибка получения пользователя из БД:', fetchError);
+                    return null;
+                }
+
+                if (existing) {
+                    let record = existing;
+                    currentUserId = existing.id;
+
+                    if (telegramUser) {
+                        const updates = {};
+
+                        if (telegramUser.username && telegramUser.username !== record.username) {
+                            updates.username = telegramUser.username;
+                        }
+
+                        if (telegramUser.first_name && telegramUser.first_name !== record.first_name) {
+                            updates.first_name = telegramUser.first_name;
+                        }
+
+                        if (Object.keys(updates).length > 0) {
+                            const { error: updateError } = await supabase
+                                .from('users')
+                                .update(updates)
+                                .eq('id', record.id);
+
+                            if (updateError) {
+                                console.warn('Не удалось обновить данные пользователя:', updateError);
+                            } else {
+                                record = { ...record, ...updates };
+                            }
+                        }
+                    }
+
+                    userRecord = record;
+                    return record;
+                }
+
+                if (!telegramUser) {
+                    return null;
+                }
+
+                const payload = {
+                    telegram_id: telegramId,
+                    username: telegramUser.username || null,
+                    first_name: telegramUser.first_name || null
+                };
+
+                const { data: inserted, error: insertError } = await supabase
+                    .from('users')
+                    .insert(payload)
+                    .select('id, username, first_name, daily_message_count, total_message_count')
+                    .single();
+
+                if (insertError) {
+                    console.error('Ошибка создания пользователя в БД:', insertError);
+                    return null;
+                }
+
+                userRecord = inserted;
+                currentUserId = inserted.id;
+                return userRecord;
+
+            } catch (err) {
+                console.error('Необработанная ошибка ensureUserRecord:', err);
+                return null;
+            }
+        }
 
         // Навигация между страницами
         const navItems = document.querySelectorAll('.nav-item');
@@ -577,17 +665,8 @@
         // Загрузка персонажей
         async function loadCharacters() {
             try {
-                // Сначала получаем ID пользователя, если его еще нет
                 if (telegramId && !currentUserId) {
-                    const userResponse = await supabase
-                        .table('users')
-                        .select('id')
-                        .eq('telegram_id', telegramId)
-                        .single();
-
-                    if (userResponse.data) {
-                        currentUserId = userResponse.data.id;
-                    }
+                    await ensureUserRecord();
                 }
 
                 // Загружаем всех персонажей
@@ -673,33 +752,37 @@
         async function loadProfile() {
             refreshTelegramUser();
 
+            const nameEl = document.getElementById('profileName');
+            const avatarEl = document.getElementById('profileAvatar');
+            const usernameEl = document.getElementById('profileUsername');
+            const dailyEl = document.getElementById('statDaily');
+            const totalEl = document.getElementById('statTotal');
+
+            const fallbackName = telegramUser?.first_name || telegramUser?.username || 'Пользователь';
+            nameEl.textContent = fallbackName;
+            avatarEl.textContent = fallbackName.charAt(0).toUpperCase() || '?';
+            usernameEl.textContent = telegramUser?.username ? `@${telegramUser.username}` : '';
+
             if (!telegramId) {
-                document.getElementById('profileName').textContent = 'Гость';
-                document.getElementById('profileAvatar').textContent = '?';
                 return;
             }
 
             try {
-                const { data, error } = await supabase
-                    .table('users')
-                    .select('*')
-                    .eq('telegram_id', telegramId)
-                    .single();
+                const record = await ensureUserRecord();
 
-                if (error) throw error;
+                if (record) {
+                    const displayName = record.first_name || record.username || fallbackName;
+                    nameEl.textContent = displayName;
+                    avatarEl.textContent = displayName.charAt(0).toUpperCase() || '?';
+                    usernameEl.textContent = record.username ? `@${record.username}` : '';
+                }
 
-                if (data) {
-                    currentUserId = data.id;
-
-                    // Обновляем профиль
-                    const name = data.first_name || data.username || 'Пользователь';
-                    document.getElementById('profileName').textContent = name;
-                    document.getElementById('profileAvatar').textContent = name.charAt(0).toUpperCase();
-                    document.getElementById('profileUsername').textContent = data.username ? `@${data.username}` : '';
-
-                    // Статистика
-                    document.getElementById('statDaily').textContent = data.daily_message_count || 0;
-                    document.getElementById('statTotal').textContent = data.total_message_count || 0;
+                if (userRecord) {
+                    dailyEl.textContent = userRecord.daily_message_count || 0;
+                    totalEl.textContent = userRecord.total_message_count || 0;
+                } else {
+                    dailyEl.textContent = 0;
+                    totalEl.textContent = 0;
                 }
 
             } catch (error) {
@@ -710,6 +793,10 @@
         // Инициализация
         async function init() {
             refreshTelegramUser();
+
+            if (telegramId) {
+                await ensureUserRecord();
+            }
 
             // Показываем кнопку создания на странице персонажей
             createBtn.style.display = 'flex';
