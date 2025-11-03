@@ -603,14 +603,23 @@
         form.addEventListener('submit', async (e) => {
             e.preventDefault();
 
-            // Получаем данные пользователя Telegram
-            const telegramUser = tg.initDataUnsafe?.user;
-            const telegramId = telegramUser?.id;
-
-            if (!telegramId) {
-                showError('Ошибка: не удалось получить данные пользователя Telegram');
+            // Проверяем, что WebApp инициализирован
+            if (!window.Telegram || !window.Telegram.WebApp) {
+                showError('Ошибка: приложение должно быть открыто через Telegram');
                 return;
             }
+
+            // Получаем данные пользователя из initDataUnsafe
+            const user = tg.initDataUnsafe?.user;
+
+            if (!user || !user.id) {
+                showError('Ошибка: не удалось получить данные пользователя. Откройте приложение через Telegram бот.');
+                return;
+            }
+
+            const telegramId = user.id;
+            const username = user.username || '';
+            const firstName = user.first_name || '';
 
             // Блокируем кнопку
             submitBtn.disabled = true;
@@ -619,16 +628,35 @@
             successMsg.style.display = 'none';
 
             try {
-                // Получаем ID пользователя из таблицы users
-                const userResponse = await supabase
+                // Ищем пользователя в таблице users
+                const { data: userData, error: userError } = await supabase
                     .from('users')
                     .select('id')
                     .eq('telegram_id', telegramId)
-                    .single();
+                    .maybeSingle();
 
                 let creatorId = null;
-                if (userResponse.data) {
-                    creatorId = userResponse.data.id;
+
+                if (userData) {
+                    // Пользователь найден
+                    creatorId = userData.id;
+                } else {
+                    // Пользователь не найден - создаем нового
+                    const { data: newUser, error: createError } = await supabase
+                        .from('users')
+                        .insert({
+                            telegram_id: telegramId,
+                            username: username,
+                            first_name: firstName
+                        })
+                        .select('id')
+                        .single();
+
+                    if (createError) {
+                        console.error('Ошибка создания пользователя:', createError);
+                    } else if (newUser) {
+                        creatorId = newUser.id;
+                    }
                 }
 
                 // Собираем данные персонажа БЕЗ фото
